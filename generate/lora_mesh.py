@@ -5,8 +5,14 @@ from pathlib import Path
 from typing import Literal, Optional
 
 import lightning as L
+import omegaconf
 import torch
+import trimesh
 from lightning.fabric.strategies import FSDPStrategy
+from tqdm import tqdm
+
+from scripts.ngon_helpers import plot_vertices_and_faces
+from scripts.ngon_soup import NgonSoup
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
@@ -16,26 +22,15 @@ from generate.base import generate
 from lit_gpt import Tokenizer
 from lit_gpt.lora import GPT, Block, Config, merge_lora_weights
 from lit_gpt.utils import check_valid_checkpoint_dir, get_default_supported_precision, lazy_load, quantization
-from scripts.prepare_alpaca import generate_prompt
 
-lora_r = 8
-lora_alpha = 16
-lora_dropout = 0.05
-lora_query = True
-lora_key = True
-lora_value = True
-lora_projection = True
-lora_mlp = True
-lora_head = True
+import pydevd_pycharm
+pydevd_pycharm.settrace('131.159.40.27', port=8000, stdoutToServer=True, stderrToServer=True)
 
 
 def main(
-    prompt: str = "What food do lamas eat?",
-    input: str = "",
     lora_path: Path = Path("out/lora/alpaca/lit_model_lora_finetuned.pth"),
-    checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-base-alpha-3b"),
     quantize: Optional[Literal["bnb.nf4", "bnb.nf4-dq", "bnb.fp4", "bnb.fp4-dq", "bnb.int8", "gptq.int4"]] = None,
-    max_new_tokens: int = 100,
+    max_new_tokens: int = 4096,
     top_k: int = 200,
     temperature: float = 0.8,
     strategy: str = "auto",
@@ -72,19 +67,23 @@ def main(
     fabric = L.Fabric(devices=devices, precision=precision, strategy=strategy)
     fabric.launch()
 
+    config_hydra = omegaconf.OmegaConf.load(Path(lora_path).parents[0] / "config.yaml")
+    checkpoint_dir = Path(config_hydra.checkpoint_dir)
+    config_hydra.out_dir = Path(config_hydra.out_dir)
+
     check_valid_checkpoint_dir(checkpoint_dir)
 
     config = Config.from_json(
         checkpoint_dir / "lit_config.json",
-        r=lora_r,
-        alpha=lora_alpha,
-        dropout=lora_dropout,
-        to_query=lora_query,
-        to_key=lora_key,
-        to_value=lora_value,
-        to_projection=lora_projection,
-        to_mlp=lora_mlp,
-        to_head=lora_head,
+        r=config_hydra.lora_r,
+        alpha=config_hydra.lora_alpha,
+        dropout=config_hydra.lora_dropout,
+        to_query=config_hydra.lora_query,
+        to_key=config_hydra.lora_key,
+        to_value=config_hydra.lora_value,
+        to_projection=config_hydra.lora_projection,
+        to_mlp=config_hydra.lora_mlp,
+        to_head=config_hydra.lora_head,
     )
 
     if quantize is not None and devices > 1:
@@ -114,30 +113,33 @@ def main(
     model = fabric.setup(model)
 
     tokenizer = Tokenizer(checkpoint_dir)
-    sample = {"instruction": prompt, "input": input}
-    prompt = generate_prompt(sample)
-    encoded = tokenizer.encode(prompt, device=model.device)
-    prompt_length = encoded.size(0)
-    max_returned_tokens = prompt_length + max_new_tokens
+    val_data = NgonSoup(tokenizer, config_hydra, 'val', False)
+
+    max_returned_tokens = min(max_new_tokens, model.config.block_size)
+    (config_hydra.out_dir / "inference").mkdir(exist_ok=True)
 
     t0 = time.perf_counter()
-    y = generate(
-        model,
-        encoded,
-        max_returned_tokens,
-        max_seq_length=max_returned_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        eos_id=tokenizer.eos_id,
-    )
+    tokens_generated = 0
+    for i in tqdm(range(8)):
+        sample = val_data.get_start(device=fabric.device)[0][0]
+        y = generate(
+            model,
+            sample,
+            max_returned_tokens,
+            max_seq_length=max_returned_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            # top_p=0.9,
+            eos_id=tokenizer.eos_id,
+        )
+        tokens_generated += y.size(0)
+        gen_vertices, gen_faces = val_data.decode(y)
+        plot_vertices_and_faces(gen_vertices, gen_faces, config_hydra.out_dir / "inference" / f"{i:02d}.jpg")
+        trimesh.Trimesh(vertices=gen_vertices, faces=gen_faces, process=False).export(config_hydra.out_dir / "inference" / f"{i:02d}.obj")
+
     t = time.perf_counter() - t0
-
     model.reset_cache()
-    output = tokenizer.decode(y)
-    output = output.split("### Response:")[1].strip()
-    fabric.print(output)
 
-    tokens_generated = y.size(0) - prompt_length
     fabric.print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
     if fabric.device.type == "cuda":
         fabric.print(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB", file=sys.stderr)

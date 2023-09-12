@@ -17,6 +17,18 @@ from lit_gpt.model import Block
 from lit_gpt.utils import check_valid_checkpoint_dir, get_default_supported_precision, lazy_load, quantization
 
 
+def top_p_sampling(logits, p):
+    probs = torch.softmax(logits, dim=-1)
+    probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
+    probs_sum = torch.cumsum(probs_sort, dim=-1)
+    mask = probs_sum - probs_sort > p
+    probs_sort[mask] = 0.0
+    probs_sort.div_(probs_sort.sum(dim=-1, keepdim=True))
+    next_token = torch.multinomial(probs_sort, num_samples=1)
+    next_token = torch.gather(probs_idx, -1, next_token)
+    return next_token
+
+
 @torch.no_grad()
 def generate(
     model: torch.nn.Module,
@@ -27,6 +39,7 @@ def generate(
     temperature: float = 1.0,
     top_k: Optional[int] = None,
     eos_id: Optional[int] = None,
+    top_p: Optional[float] = None,
 ) -> torch.Tensor:
     """Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
 
@@ -53,7 +66,6 @@ def generate(
     # generate up to a fixed number of tokens
     for _ in range(max_returned_tokens - T):
         x = idx.index_select(0, input_pos).view(1, -1)
-
         # forward
         logits = model(x, max_seq_length, input_pos)
         logits = logits[0, -1] / temperature
@@ -63,8 +75,12 @@ def generate(
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
             logits = torch.where(logits < v[[-1]], -float("Inf"), logits)
 
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        idx_next = torch.multinomial(probs, num_samples=1).to(dtype=dtype)
+        if top_p is not None:
+            idx_next = top_p_sampling(logits, top_p).to(dtype=dtype)
+        else:
+            # apply softmax to convert logits to (normalized) probabilities
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1).to(dtype=dtype)
 
         # advance
         input_pos = input_pos[-1:] + 1

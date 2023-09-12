@@ -197,7 +197,7 @@ class SpeedMonitorBase:
     ):
         self.flops_available = flops_available
         self.log_dict = log_dict
-
+        self.enabled = True
         # Track the batch num samples and wct to compute throughput over a window of batches
         self.history_samples: Deque[int] = deque(maxlen=window_size + 1)
         self.history_wct: Deque[float] = deque(maxlen=window_size + 1)
@@ -233,7 +233,8 @@ class SpeedMonitorBase:
         self.step += 1
         step = self.step
         metrics = {}
-
+        if not self.enabled:
+            return
         self.history_samples.append(samples)
         if lengths is not None:
             self.history_lengths.append(lengths)

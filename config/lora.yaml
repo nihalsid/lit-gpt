@@ -1,0 +1,50 @@
+# Hyperparameters
+experiment: fastdev
+learning_rate: 3e-4
+batch_size: 64
+micro_batch_size: 4
+chunk_size: 1024
+
+wandb_main: False
+suffix: ''
+
+num_epochs: 1
+eval_interval: 0.25
+eval_iters: 0.50
+warmup_epochs: 0.05
+log_interval: 1
+
+num_workers: 12
+
+scale_augment: True
+scale_augment_val: False
+
+weight_decay: 0.01
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_query: True
+lora_key: True
+lora_value: True
+lora_projection: True
+lora_mlp: True
+lora_head: True
+
+data_dir: "data/alpaca"
+checkpoint_dir: "/cluster/gimli/ysiddiqui/Llama-2-7b-hf"
+precision: bf16-true
+quantize: null
+resume: null
+
+out_dir: null
+
+max_new_tokens: 4095
+
+block_size: 2048
+dataset_root: 'data/shapenet/soup_256_1.5K_4K.pkl'
+num_tokens: 259
+padding: 0.01
+max_vertices: 2500
+max_faces: 10000
+
+overfit: False

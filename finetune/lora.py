@@ -6,7 +6,7 @@ from typing import Dict, List, Literal, Optional, Tuple
 
 import lightning as L
 import torch
-from lightning.fabric.strategies import FSDPStrategy
+from lightning.fabric.strategies import FSDPStrategy, DDPStrategy
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
@@ -48,11 +48,11 @@ lora_r = 8
 lora_alpha = 16
 lora_dropout = 0.05
 lora_query = True
-lora_key = False
+lora_key = True
 lora_value = True
-lora_projection = False
-lora_mlp = False
-lora_head = False
+lora_projection = True
+lora_mlp = True
+lora_head = True
 warmup_steps = 100
 
 hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str)) and not k.startswith("_")}
@@ -74,12 +74,16 @@ def setup(
                 "Quantization is currently not supported for multi-GPU training. "
                 "Please set devices=1 when using the --quantization flag."
             )
+        '''
+        # nihalsid: Use DDP instead of FSDP
         strategy = FSDPStrategy(
             auto_wrap_policy={Block},
             activation_checkpointing_policy={Block},
             state_dict_type="full",
             limit_all_gathers=True,
         )
+        '''
+        strategy = DDPStrategy(process_group_backend="nccl")
     else:
         strategy = "auto"
 

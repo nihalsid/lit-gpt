@@ -495,7 +495,7 @@ class GPT(BaseModel):
             assert (
                 max_seq_length >= T
             ), f"Cannot forward sequence of length {T}, max seq length is only {max_seq_length}"
-        assert max_seq_length <= block_size, f"Cannot attend to {max_seq_length}, block size is only {block_size}"
+        # assert max_seq_length <= block_size, f"Cannot attend to {max_seq_length}, block size is only {block_size}"
         assert block_size >= T, f"Cannot forward sequence of length {T}, block size is only {block_size}"
 
         if self.rope_cache is None:

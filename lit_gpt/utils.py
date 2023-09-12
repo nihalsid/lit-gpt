@@ -452,7 +452,6 @@ def chunked_cross_entropy(
     # the memory usage in fine-tuning settings with low number of parameters.
     # as a workaround hack, the cross entropy computation is chunked to force it to deallocate on the go, reducing
     # the memory spike's magnitude
-
     # lm_head was chunked (we are fine-tuning)
     if isinstance(logits, list):
         # don't want to chunk cross entropy
