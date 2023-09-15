@@ -115,21 +115,26 @@ def main(
     tokenizer = Tokenizer(checkpoint_dir)
     val_data = NgonSoup(tokenizer, config_hydra, 'val', False)
 
-    max_returned_tokens = min(max_new_tokens, model.config.block_size)
+    max_returned_tokens = max_new_tokens
     (config_hydra.out_dir / "inference").mkdir(exist_ok=True)
+
+    with fabric.init_tensor():
+        # enable the kv cache
+        # todo: delete this line, just a debug
+        model.max_seq_length = 64
+        model.set_kv_cache(batch_size=1)
 
     t0 = time.perf_counter()
     tokens_generated = 0
-    for i in tqdm(range(8)):
+    for i in tqdm(range(1)):
         sample = val_data.get_start(device=fabric.device)[0][0]
         y = generate(
             model,
             sample,
             max_returned_tokens,
-            max_seq_length=max_returned_tokens,
             temperature=temperature,
             top_k=top_k,
-            # top_p=0.9,
+            top_p=0.9,
             eos_id=tokenizer.eos_id,
         )
         tokens_generated += y.size(0)
@@ -138,7 +143,7 @@ def main(
         trimesh.Trimesh(vertices=gen_vertices, faces=gen_faces, process=False).export(config_hydra.out_dir / "inference" / f"{i:02d}.obj")
 
     t = time.perf_counter() - t0
-    model.reset_cache()
+    model.clear_kv_cache()
 
     fabric.print(f"\n\nTime for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec", file=sys.stderr)
     if fabric.device.type == "cuda":

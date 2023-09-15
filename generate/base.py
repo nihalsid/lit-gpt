@@ -6,6 +6,7 @@ from typing import Literal, Optional
 import lightning as L
 import torch
 from lightning.fabric.strategies import FSDPStrategy
+from tqdm import tqdm
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
@@ -50,50 +51,89 @@ def generate(
         temperature: Scales the predicted logits by 1 / temperature.
         top_k: If specified, only sample among the tokens with the k highest probabilities.
         eos_id: If specified, stop generating any more token once the <eos> token is triggered.
+        top_p: top p nucleus sampling. If specified, only sample among the most probable tokens whose cumulative probability mass exceeds p.
     """
     T = idx.size(0)
     assert max_returned_tokens > T
-    if model.max_seq_length < max_returned_tokens - 1:
+    # if model.max_seq_length < max_returned_tokens - 1:
         # rolling the kv cache based on the `input_pos` value would be necessary. However, doing so would introduce a
         # data dependency on the `input_pos` tensor and impact model compilation. Since this setting is uncommon, we do
         # not support it to avoid negatively impacting the overall speed
-        raise NotImplementedError(f"max_seq_length {model.max_seq_length} needs to be < {max_returned_tokens - 1}")
+        # raise NotImplementedError(f"max_seq_length {model.max_seq_length} needs to be < {max_returned_tokens - 1}")
 
     device, dtype = idx.device, idx.dtype
     # create an empty tensor of the expected final shape and fill in the current tokens
-    empty = torch.empty(max_returned_tokens, dtype=dtype, device=device)
+    empty = torch.zeros(max_returned_tokens, dtype=dtype, device=device)
     empty[:T] = idx
     idx = empty
-    input_pos = torch.arange(0, T, device=device)
+    unbounded_input_pos = torch.arange(0, T, device=device)
 
-    # generate up to a fixed number of tokens
-    for _ in range(max_returned_tokens - T):
-        x = idx.index_select(0, input_pos).view(1, -1)
-        # forward
+    # first generate upto model.max_seq_length tokens
+    num_tokens_stage_0 = min(model.max_seq_length - T, max_returned_tokens - T)
+    num_tokens_stage_1 = max_returned_tokens - T - num_tokens_stage_0
+
+    def get_next_token():
         logits = model(x, input_pos)
         logits = logits[0, -1] / temperature
-
+        # todo: remove this line, only for debug
+        return logits.argmax(dim=-1)
         # optionally crop the logits to only the top k options
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
             logits = torch.where(logits < v[[-1]], -float("Inf"), logits)
 
         if top_p is not None:
-            idx_next = top_p_sampling(logits, top_p).to(dtype=dtype)
+            next_token = top_p_sampling(logits, top_p).to(dtype=dtype)
         else:
             # apply softmax to convert logits to (normalized) probabilities
             probs = torch.nn.functional.softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1).to(dtype=dtype)
+            next_token = torch.multinomial(probs, num_samples=1).to(dtype=dtype)
+        return next_token
 
+    input_pos = unbounded_input_pos.clone()
+
+    # generate up to a fixed number of tokens
+    for _ in tqdm(range(num_tokens_stage_0), desc='token_gen_0'):
+        x = idx.index_select(0, unbounded_input_pos).view(1, -1)
+        # forward
+        idx_next = get_next_token()
         # advance
-        input_pos = input_pos[-1:] + 1
+        unbounded_input_pos = unbounded_input_pos[-1:] + 1
+        input_pos = torch.clamp(unbounded_input_pos, min=0, max=model.max_seq_length - 1)
 
         # concatenate the new generation
-        idx = idx.index_copy(0, input_pos, idx_next)
+        idx = idx.index_copy(0, unbounded_input_pos, idx_next)
 
         # if <eos> token is triggered, return the output (stop generation)
         if idx_next == eos_id:
-            return idx[:input_pos]  # include the EOS token
+            return idx[:unbounded_input_pos]  # include the EOS token
+
+    # for _ in tqdm(range(num_tokens_stage_1), desc='token_gen_1'):
+    #     x = idx.index_select(0, unbounded_input_pos).view(1, -1)
+    #     # forward
+    #     idx_next = get_next_token()
+    #     # advance
+    #     unbounded_input_pos = unbounded_input_pos[-1:] + 1
+    #     # concatenate the new generation
+    #     idx = idx.index_copy(0, unbounded_input_pos, idx_next)
+    #
+    #     if idx_next == eos_id:
+    #         return idx[:unbounded_input_pos]  # include the EOS token
+    #
+    #     model.roll_kv_cache()
+
+    input_pos = torch.arange(0, model.max_seq_length, device=device)
+    for _ in tqdm(range(num_tokens_stage_1), desc='token_gen_1'):
+        x = idx[unbounded_input_pos - model.max_seq_length + 1: unbounded_input_pos + 1].view(1, -1)
+        # forward
+        idx_next = get_next_token()
+        # advance
+        unbounded_input_pos = unbounded_input_pos[-1:] + 1
+        # concatenate the new generation
+        idx = idx.index_copy(0, unbounded_input_pos, idx_next)
+
+        if idx_next == eos_id:
+            return idx[:unbounded_input_pos]  # include the EOS token
 
     return idx
 

@@ -192,7 +192,7 @@ def train(fabric, model, optimizer, config, speed_monitor):
             targets = sample['target']
             is_accumulating = (iter_num + 1) % gradient_accumulation_iters != 0
             with fabric.no_backward_sync(model, enabled=is_accumulating):
-                logits = model(input_ids, max_seq_length=max_seq_length, lm_head_chunk_size=128)
+                logits = model(input_ids, lm_head_chunk_size=128)
                 # shift the targets such that output n predicts token n+1
                 logits[-1] = logits[-1][..., :-1, :]
                 loss = chunked_cross_entropy(logits, targets[..., 1:])
@@ -261,21 +261,22 @@ def validate(fabric, model, val_data, val_dataloader, eval_iters, max_new_tokens
     # produce an example:
     max_returned_tokens = min(max_new_tokens, model.config.block_size)
     outdir.mkdir(exist_ok=True)
+
     for i in range(8):
         sample = val_data.get_start(device=fabric.device)[0][0]
-
+        with fabric.init_tensor():
+            # do not set `max_seq_length=max_returned_token` because memory is not a concern here
+            model.set_kv_cache(batch_size=1)
         output = generate(
-            model, idx=sample, max_returned_tokens=max_returned_tokens,
-            max_seq_length=max_returned_tokens, temperature=0.8, eos_id=tokenizer.eos_id,
+            model, idx=sample, max_returned_tokens=max_returned_tokens, temperature=0.8, eos_id=tokenizer.eos_id
         )
+        model.clear_kv_cache()
         gen_vertices, gen_faces = val_data.decode(output)
         plot_vertices_and_faces(gen_vertices, gen_faces, outdir / f"{i:02d}.jpg")
         trimesh.Trimesh(vertices=gen_vertices, faces=gen_faces, process=False).export(outdir / f"{i:02d}.obj")
 
     # output = tokenizer.decode(output)
     # fabric.print(output)
-
-    model.reset_cache()
 
     model.train()
     return val_loss, acc

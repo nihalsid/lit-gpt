@@ -119,7 +119,7 @@ def ngonsoup_sequence_to_mesh(output, tokenizer, num_tokens):
     output_text = tokenizer.decode(output).split(' ')
     soup_sequence = []
     for i in range(len(output_text)):
-        if output_text[i].isnumeric():
+        if output_text[i].isdecimal():
             soup_sequence.append(int(output_text[i]))
     end = len(soup_sequence)
     soup_sequence = soup_sequence[:end]

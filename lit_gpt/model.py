@@ -102,6 +102,11 @@ class GPT(nn.Module):
             base=self.config.rope_base,
         )
 
+    def roll_kv_cache(self):
+        # roll the kv cache for all blocks
+        for block in self.transformer.h:
+            block.attn.kv_cache.roll_left()
+
     def set_kv_cache(
         self,
         batch_size: int,
@@ -358,3 +363,7 @@ class KVCache(nn.Module):
         k = self.k.index_copy_(2, input_pos, k)
         v = self.v.index_copy_(2, input_pos, v)
         return k, v
+
+    def roll_left(self):
+        self.k = torch.roll(self.k, -1, dims=2)
+        self.v = torch.roll(self.v, -1, dims=2)
