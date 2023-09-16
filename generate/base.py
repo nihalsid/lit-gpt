@@ -76,7 +76,7 @@ def generate(
         logits = model(x, input_pos)
         logits = logits[0, -1] / temperature
         # todo: remove this line, only for debug
-        return logits.argmax(dim=-1)
+        # return logits.argmax(dim=-1)
         # optionally crop the logits to only the top k options
         if top_k is not None:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -108,7 +108,7 @@ def generate(
         if idx_next == eos_id:
             return idx[:unbounded_input_pos]  # include the EOS token
 
-    # for _ in tqdm(range(num_tokens_stage_1), desc='token_gen_1'):
+    # for iter_idx in tqdm(range(num_tokens_stage_1), desc='token_gen_1'):
     #     x = idx.index_select(0, unbounded_input_pos).view(1, -1)
     #     # forward
     #     idx_next = get_next_token()
@@ -119,7 +119,6 @@ def generate(
     #
     #     if idx_next == eos_id:
     #         return idx[:unbounded_input_pos]  # include the EOS token
-    #
     #     model.roll_kv_cache()
 
     input_pos = torch.arange(0, model.max_seq_length, device=device)

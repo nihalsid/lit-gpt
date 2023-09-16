@@ -114,13 +114,19 @@ def normalize_vertices(vertices):
     return vertices
 
 
-def ngonsoup_sequence_to_mesh(output, tokenizer, num_tokens):
-
+def to_soup_sequence(output, tokenizer, fill_errors=False):
     output_text = tokenizer.decode(output).split(' ')
     soup_sequence = []
     for i in range(len(output_text)):
         if output_text[i].isdecimal():
             soup_sequence.append(int(output_text[i]))
+        if fill_errors:
+            soup_sequence.append(-1)
+    return soup_sequence
+
+
+def ngonsoup_sequence_to_mesh(output, tokenizer, num_tokens):
+    soup_sequence = to_soup_sequence(output, tokenizer)
     end = len(soup_sequence)
     soup_sequence = soup_sequence[:end]
     vertices_q = []

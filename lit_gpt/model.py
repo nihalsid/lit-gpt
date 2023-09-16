@@ -156,9 +156,11 @@ class Block(nn.Module):
         sin: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        cos_full: Optional[torch.Tensor] = None,
+        sin_full: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         n_1 = self.norm_1(x)
-        h = self.attn(n_1, cos, sin, mask, input_pos)
+        h = self.attn(n_1, cos, sin, mask, input_pos, cos_full, sin_full)
         if self.config.parallel_residual:
             n_2 = n_1 if self.config.shared_attention_norm else self.norm_2(x)
             x = x + h + self.mlp(n_2)
@@ -193,6 +195,8 @@ class CausalSelfAttention(nn.Module):
         sin: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
         input_pos: Optional[torch.Tensor] = None,
+        cos_full: Optional[torch.Tensor] = None,
+        sin_full: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality (n_embd)
 
@@ -218,14 +222,17 @@ class CausalSelfAttention(nn.Module):
         v = v.reshape(B, -1, T, self.config.head_size)  # (B, nh_v, T, hs)
 
         q_roped = apply_rope(q[..., : self.config.rope_n_elem], cos, sin)
-        k_roped = apply_rope(k[..., : self.config.rope_n_elem], cos, sin)
         q = torch.cat((q_roped, q[..., self.config.rope_n_elem :]), dim=-1)
-        k = torch.cat((k_roped, k[..., self.config.rope_n_elem :]), dim=-1)
 
         if input_pos is not None:
             if not isinstance(self.kv_cache, KVCache):
                 raise TypeError("You need to call `gpt.set_kv_cache()`")
             k, v = self.kv_cache(input_pos, k, v)
+            k_roped = apply_rope(k[..., : self.config.rope_n_elem], cos_full, sin_full)
+            k = torch.cat((k_roped, k[..., self.config.rope_n_elem:]), dim=-1)
+        else:
+            k_roped = apply_rope(k[..., : self.config.rope_n_elem], cos, sin)
+            k = torch.cat((k_roped, k[..., self.config.rope_n_elem:]), dim=-1)
 
         y = self.scaled_dot_product_attention(q, k, v, mask)
 

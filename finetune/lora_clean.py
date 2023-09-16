@@ -16,23 +16,26 @@ from tqdm import tqdm
 from finetune.lora import save_lora_checkpoint
 from generate.base import generate
 from lit_gpt import Tokenizer
-from lit_gpt.lora import GPT, mark_only_lora_as_trainable, Config
+from lit_gpt.lora import GPT, mark_only_lora_as_trainable, Config, merge_lora_weights
 from lit_gpt.utils import get_default_supported_precision, check_valid_checkpoint_dir, quantization, num_parameters, chunked_cross_entropy, lazy_load
 from lit_gpt.speed_monitor import SpeedMonitorFabric, estimate_flops, measure_flops
 import datetime
 import randomname
 
-from scripts.ngon_helpers import plot_vertices_and_faces
+from scripts.ngon_helpers import plot_vertices_and_faces, to_soup_sequence
 from scripts.ngon_soup import NgonSoup
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
 sys.path.append(str(wd))
 
+# import pydevd_pycharm
+# pydevd_pycharm.settrace('131.159.40.27', port=8000, stdoutToServer=True, stderrToServer=True)
+
 
 def generate_experiment_name(name, config):
     if config.resume is not None:
-        experiment = Path(config.resume).parents[1].name
+        experiment = Path(config.resume).parent.name
         os.environ['experiment'] = experiment
     elif not os.environ.get('experiment'):
         experiment = f"{datetime.datetime.now().strftime('%m%d%H%M')}_{name}_{config.experiment}_{randomname.get_name()}"
@@ -96,9 +99,16 @@ def main(fabric, config):
 
     with fabric.init_module(empty_init=False), quantization(config.quantize):
         model = GPT(lora_config)
-    with lazy_load(checkpoint_path) as checkpoint:
-        # strict=False because missing keys due to LoRA weights not contained in state dict
-        model.load_state_dict(checkpoint, strict=False)
+    if config.resume is None:
+        with lazy_load(checkpoint_path) as checkpoint:
+            # strict=False because missing keys due to LoRA weights not contained in state dict
+            model.load_state_dict(checkpoint, strict=False)
+    else:
+        with lazy_load(checkpoint_path) as checkpoint, lazy_load(config.resume) as lora_checkpoint:
+            checkpoint.update(lora_checkpoint.get("model", lora_checkpoint))
+            model.load_state_dict(checkpoint, strict=config.quantize is None)
+            merge_lora_weights(model)
+
     mark_only_lora_as_trainable(model)
 
     fabric.print(f"Number of trainable parameters: {num_parameters(model, requires_grad=True):,}")
@@ -198,6 +208,7 @@ def train(fabric, model, optimizer, config, speed_monitor):
                 loss = chunked_cross_entropy(logits, targets[..., 1:])
                 unchunked_logits = torch.cat([x.detach() for x in logits], dim=1)
                 acc = accuracy(unchunked_logits, targets[..., 1:], ignore_label=-1, device=fabric.device)
+                acc_text = accuracy_text(unchunked_logits, targets[..., 1:], tokenizer, ignore_label=-1, device=fabric.device)
                 fabric.backward(loss / gradient_accumulation_iters)
 
             if not is_accumulating:
@@ -222,16 +233,18 @@ def train(fabric, model, optimizer, config, speed_monitor):
                 # )
                 fabric.logger.log_metrics({"train/ce_loss": loss.item()}, step=iter_num)
                 fabric.logger.log_metrics({"train/acc": acc.item()}, step=iter_num)
+                fabric.logger.log_metrics({"train/acc_text": acc_text.item()}, step=iter_num)
                 titer.set_postfix(loss=loss.item(), acc=acc.item())
 
             if (iter_num + 1) % eval_interval == 0:
                 t0 = time.perf_counter()
-                val_loss, val_acc = validate(fabric, model, val_data, val_dataloader, eval_iters, config.max_new_tokens, tokenizer, config.out_dir / f"{iter_num:06d}")
+                val_loss, val_acc, val_acctext = validate(fabric, model, val_data, val_dataloader, eval_iters, config.max_new_tokens, tokenizer, config.out_dir / f"{iter_num:06d}")
                 t1 = time.perf_counter() - t0
                 speed_monitor.eval_end(t1)
                 # fabric.print(f"step {iter_num}: val loss {val_loss.item():.4f}, val time: {t1 * 1000:.2f}ms")
                 fabric.logger.log_metrics({"val/ce_loss": val_loss.item()}, step=iter_num)
                 fabric.logger.log_metrics({"val/acc": val_acc.item()}, step=iter_num)
+                fabric.logger.log_metrics({"val/acc_text": val_acctext.item()}, step=iter_num)
                 fabric.barrier()
 
             if (iter_num + 1) % save_interval == 0:
@@ -246,17 +259,20 @@ def validate(fabric, model, val_data, val_dataloader, eval_iters, max_new_tokens
     model.eval()
     losses = torch.zeros(eval_iters)
     accs = torch.zeros(eval_iters)
+    acctxts = torch.zeros(eval_iters)
     for k, batch in enumerate(val_dataloader):
         input_ids = batch['input']
         targets = batch['target']
         logits = model(input_ids)
         losses[k] = chunked_cross_entropy(logits[..., :-1, :], targets[..., 1:], chunk_size=0)
         accs[k] = accuracy(logits[..., :-1, :].detach(), targets[..., 1:], ignore_label=-1, device=fabric.device)
+        acctxts[k] = accuracy_text(logits[..., :-1, :].detach(), targets[..., 1:], tokenizer, ignore_label=-1, device=fabric.device)
         if k + 1 == eval_iters:
             break
 
     val_loss = losses.mean()
     acc = accs.mean()
+    acc_text = acctxts.mean()
 
     # produce an example:
     max_returned_tokens = min(max_new_tokens, model.config.block_size)
@@ -279,7 +295,7 @@ def validate(fabric, model, val_data, val_dataloader, eval_iters, max_new_tokens
     # fabric.print(output)
 
     model.train()
-    return val_loss, acc
+    return val_loss, acc, acc_text
 
 
 def accuracy(y_pred, y_true, ignore_label=None, device=None):
@@ -296,6 +312,26 @@ def accuracy(y_pred, y_true, ignore_label=None, device=None):
         normalizer = y_true.shape[0]
         ignore_mask = torch.ones_like(y_true, device=device).type(torch.float32)
     acc = (y_pred.reshape(-1) == y_true.reshape(-1)).type(torch.float32)  # type: ignore
+    acc = torch.sum(acc*ignore_mask.flatten())
+    return acc / normalizer
+
+
+def accuracy_text(y_pred, y_true, tokenizer, ignore_label=None, device=None):
+    y_pred = y_pred.argmax(dim=-1).reshape(-1)
+    y_true = y_true.reshape(-1)
+    mask = y_true != ignore_label
+    y_pred = y_pred[mask]
+    y_true = y_true[mask]
+    y_pred = torch.tensor(to_soup_sequence(y_pred, tokenizer, fill_errors=True), dtype=torch.long, device=device)
+    y_true = torch.tensor(to_soup_sequence(y_true, tokenizer, fill_errors=True), dtype=torch.long, device=device)
+
+    size = max(y_pred.shape[0], y_true.shape[0])
+    y_pred = torch.cat([y_pred, torch.ones(size - y_pred.shape[0], dtype=torch.long, device=device)])
+    y_true = torch.cat([y_true, torch.ones(size - y_true.shape[0], dtype=torch.long, device=device)])
+
+    normalizer = y_true.shape[0]
+    ignore_mask = torch.ones_like(y_true, device=device).type(torch.float32)
+    acc = (y_pred == y_true).type(torch.float32)  # type: ignore
     acc = torch.sum(acc*ignore_mask.flatten())
     return acc / normalizer
 
