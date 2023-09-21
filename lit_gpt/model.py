@@ -84,7 +84,7 @@ class GPT(nn.Module):
 
         x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
         for block in self.transformer.h:
-            x = block(x, cos, sin, mask, input_pos)
+            x = block(x, cos, sin, mask, input_pos, self.cos, self.sin)
         x = self.transformer.ln_f(x)
         return self.lm_head(x)  # (b, t, vocab_size)
 

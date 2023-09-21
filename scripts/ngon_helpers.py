@@ -1,7 +1,6 @@
 import numpy as np
 import networkx as nx
 
-
 newface_token = 0
 stopface_token = 1
 
@@ -104,6 +103,18 @@ def scale_vertices(vertices, x_lims=(0.75, 1.25), y_lims=(0.75, 1.25), z_lims=(0
     z = np.random.uniform(low=z_lims[0], high=z_lims[1], size=(1,))
     vertices = np.stack([vertices[:, 0] * x, vertices[:, 1] * y, vertices[:, 2] * z], axis=-1)
     # scale back to unit cube
+    return vertices
+
+
+def shift_vertices(vertices, x_lims=(-0.1, 0.1), y_lims=(-0.1, 0.1), z_lims=(-0.075, 0.075)):
+    # shift x, y, z
+    x = np.random.uniform(low=x_lims[0], high=x_lims[1], size=(1,))
+    y = np.random.uniform(low=y_lims[0], high=y_lims[1], size=(1,))
+    z = np.random.uniform(low=z_lims[0], high=z_lims[1], size=(1,))
+    x = max(min(x, 0.5 - vertices[:, 0].max()), -0.5 - vertices[:, 0].min())
+    y = max(min(y, 0.5 - vertices[:, 1].max()), -0.5 - vertices[:, 1].min())
+    z = max(min(z, 0.5 - vertices[:, 2].max()), -0.5 - vertices[:, 2].min())
+    vertices = np.stack([vertices[:, 0] + x, vertices[:, 1] + y, vertices[:, 2] + z], axis=-1)
     return vertices
 
 

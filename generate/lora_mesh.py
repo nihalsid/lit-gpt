@@ -113,7 +113,7 @@ def main(
     model = fabric.setup(model)
 
     tokenizer = Tokenizer(checkpoint_dir)
-    val_data = NgonSoup(tokenizer, config_hydra, 'val', False)
+    val_data = NgonSoup(tokenizer, config_hydra, 'val', False, False)
 
     max_returned_tokens = max_new_tokens
     (config_hydra.out_dir / "inference").mkdir(exist_ok=True)
@@ -126,7 +126,7 @@ def main(
 
     t0 = time.perf_counter()
     tokens_generated = 0
-    for i in tqdm(range(1)):
+    for i in tqdm(range(32)):
         sample = val_data.get_start(device=fabric.device)[0][0]
         y = generate(
             model,

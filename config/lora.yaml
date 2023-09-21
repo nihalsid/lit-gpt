@@ -18,6 +18,10 @@ num_workers: 12
 
 scale_augment: True
 scale_augment_val: False
+shift_augment: False
+shift_augment_val: False
+
+only_chairs: False
 
 weight_decay: 0.01
 lora_r: 8

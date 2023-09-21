@@ -8,12 +8,12 @@ import torch.utils.data
 import pickle
 from numpy import random
 
-from scripts.ngon_helpers import normalize_vertices, quantize_soup, scale_vertices, ngonsoup_sequence_to_mesh, plot_vertices_and_faces
+from scripts.ngon_helpers import normalize_vertices, quantize_soup, scale_vertices, ngonsoup_sequence_to_mesh, plot_vertices_and_faces, shift_vertices
 
 
 class NgonSoup(Dataset):
 
-    def __init__(self, tokenizer, config, split, scale_augment):
+    def __init__(self, tokenizer, config, split, scale_augment, shift_augment):
         super().__init__()
         data_path = Path(config.dataset_root)
         self.tokenizer = tokenizer
@@ -25,6 +25,7 @@ class NgonSoup(Dataset):
         self.max_vertices = config.max_vertices
         self.max_faces = config.max_faces
         self.scale_augment = scale_augment
+        self.shift_augment = shift_augment
         with open(data_path, 'rb') as fptr:
             data = pickle.load(fptr)
             if not config.overfit:
@@ -37,6 +38,12 @@ class NgonSoup(Dataset):
                 self.names = data[f'name_train'][overfit_sample_index: overfit_sample_index + 1] * multiplier
                 self.cached_vertices = data[f'vertices_train'][overfit_sample_index: overfit_sample_index + 1] * multiplier
                 self.cached_faces = data[f'faces_train'][overfit_sample_index: overfit_sample_index + 1] * multiplier
+
+        if config.only_chairs:
+            self.cached_vertices = [self.cached_vertices[i] for i in range(len(self.cached_vertices)) if self.names[i].split('_')[0] == '03001627']
+            self.cached_faces = [self.cached_faces[i] for i in range(len(self.cached_faces)) if self.names[i].split('_')[0] == '03001627']
+            self.names = [self.names[i] for i in range(len(self.names)) if self.names[i].split('_')[0] == '03001627']
+
         print(len(self.cached_vertices), "meshes loaded")
 
         max_inner_face_len = 0
@@ -58,9 +65,10 @@ class NgonSoup(Dataset):
         faces = self.cached_faces[index]
 
         if self.scale_augment:
-            vertices = normalize_vertices(scale_vertices(vertices))
-        else:
-            vertices = normalize_vertices(vertices)
+            vertices = scale_vertices(vertices)
+        vertices = normalize_vertices(vertices)
+        if self.shift_augment:
+            vertices = shift_vertices(vertices)
 
         soup_sequence = \
             quantize_soup(vertices, faces, num_tokens=self.num_tokens - 3, max_vertices=self.max_vertices, max_faces=self.max_faces)  # throws error if processing fails

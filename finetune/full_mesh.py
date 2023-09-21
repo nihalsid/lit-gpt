@@ -13,11 +13,11 @@ from omegaconf import OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from finetune.lora import save_lora_checkpoint
+from finetune.full import save_checkpoint
 from generate.base import generate
 from lit_gpt import Tokenizer
-from lit_gpt.lora import GPT, mark_only_lora_as_trainable, Config, merge_lora_weights
-from lit_gpt.utils import get_default_supported_precision, check_valid_checkpoint_dir, quantization, num_parameters, chunked_cross_entropy, lazy_load
+from lit_gpt.model import GPT, Config, Block
+from lit_gpt.utils import get_default_supported_precision, check_valid_checkpoint_dir, num_parameters, chunked_cross_entropy, lazy_load
 from lit_gpt.speed_monitor import SpeedMonitorFabric, estimate_flops, measure_flops
 import datetime
 import randomname
@@ -81,46 +81,25 @@ def main(fabric, config):
     if fabric.global_rank == 0:
         os.makedirs(config.out_dir, exist_ok=True)
 
-    lora_config = Config.from_name(
-        name=config.checkpoint_dir.name,
-        r=config.lora_r,
-        alpha=config.lora_alpha,
-        dropout=config.lora_dropout,
-        to_query=config.lora_query,
-        to_key=config.lora_key,
-        to_value=config.lora_value,
-        to_projection=config.lora_projection,
-        to_mlp=config.lora_mlp,
-        to_head=config.lora_head,
-    )
+    full_config = Config.from_name(name=config.checkpoint_dir.name)
 
     checkpoint_path = config.checkpoint_dir / "lit_model.pth"
-    fabric.print(f"Loading model {str(checkpoint_path)!r} with {lora_config.__dict__}")
+    fabric.print(f"Loading model {str(checkpoint_path)!r} with {full_config.__dict__}")
 
-    with fabric.init_module(empty_init=False), quantization(config.quantize):
-        model = GPT(lora_config)
+    with fabric.init_module(empty_init=False):
+        model = GPT(full_config)
     if config.resume is None:
         with lazy_load(checkpoint_path) as checkpoint:
             # strict=False because missing keys due to LoRA weights not contained in state dict
             model.load_state_dict(checkpoint, strict=False)
     else:
-        with lazy_load(checkpoint_path) as checkpoint, lazy_load(config.resume) as lora_checkpoint:
-            checkpoint.update(lora_checkpoint.get("model", lora_checkpoint))
-            model.load_state_dict(checkpoint, strict=config.quantize is None)
-            merge_lora_weights(model)
-
-    mark_only_lora_as_trainable(model)
+        with lazy_load(config.resume) as checkpoint:
+            model.load_state_dict(checkpoint)
 
     fabric.print(f"Number of trainable parameters: {num_parameters(model, requires_grad=True):,}")
     fabric.print(f"Number of non trainable parameters: {num_parameters(model, requires_grad=False):,}")
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    if config.quantize and config.quantize.startswith("bnb."):
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.PagedAdamW(trainable_params, lr=config.learning_rate, weight_decay=config.weight_decay)
-    else:
-        optimizer = torch.optim.AdamW(trainable_params, lr=config.learning_rate, weight_decay=config.weight_decay)
-
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     model, optimizer = fabric.setup(model, optimizer)
     fabric.seed_everything(1337 + fabric.global_rank)
 
@@ -131,8 +110,8 @@ def main(fabric, config):
         fabric.print(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
 
     # Save the final LoRA checkpoint at the end of training
-    save_path = config.out_dir / "lit_model_lora_finetuned.pth"
-    save_lora_checkpoint(fabric, model, save_path)
+    save_path = config.out_dir / "lit_model_finetuned.pth"
+    save_checkpoint(fabric, model, save_path)
 
 
 def train(fabric, model, optimizer, config, speed_monitor):
@@ -171,7 +150,6 @@ def train(fabric, model, optimizer, config, speed_monitor):
 
     with torch.device("meta"):
         meta_model = GPT(model.config)
-        mark_only_lora_as_trainable(meta_model)
         # "estimated" is not as precise as "measured". Estimated is optimistic but widely used in the wild.
         # When comparing MFU or FLOP numbers with other projects that use estimated FLOPs,
         # consider passing `SpeedMonitor(flops_per_batch=estimated_flops)` instead
@@ -202,13 +180,11 @@ def train(fabric, model, optimizer, config, speed_monitor):
             targets = sample['target']
             is_accumulating = (iter_num + 1) % gradient_accumulation_iters != 0
             with fabric.no_backward_sync(model, enabled=is_accumulating):
-                logits = model(input_ids, lm_head_chunk_size=128)
+                logits = model(input_ids)
                 # shift the targets such that output n predicts token n+1
-                logits[-1] = logits[-1][..., :-1, :]
-                loss = chunked_cross_entropy(logits, targets[..., 1:])
-                unchunked_logits = torch.cat([x.detach() for x in logits], dim=1)
-                acc = accuracy(unchunked_logits, targets[..., 1:], ignore_label=-1, device=fabric.device)
-                acc_text = accuracy_text(unchunked_logits, targets[..., 1:], tokenizer, ignore_label=-1, device=fabric.device)
+                loss = chunked_cross_entropy(logits[..., :-1, :], targets[..., 1:], chunk_size=0)
+                acc = accuracy(logits[..., :-1, :], targets[..., 1:], ignore_label=-1, device=fabric.device)
+                acc_text = accuracy_text(logits[..., :-1, :], targets[..., 1:], tokenizer, ignore_label=-1, device=fabric.device)
                 fabric.backward(loss / gradient_accumulation_iters)
 
             if not is_accumulating:
@@ -250,7 +226,7 @@ def train(fabric, model, optimizer, config, speed_monitor):
             if (iter_num + 1) % save_interval == 0:
                 checkpoint_path = config.out_dir / f"iter-{iter_num:06d}-ckpt.pth"
                 fabric.print('saving...', checkpoint_path)
-                save_lora_checkpoint(fabric, model, checkpoint_path)
+                save_checkpoint(fabric, model, checkpoint_path)
 
 
 @torch.no_grad()
